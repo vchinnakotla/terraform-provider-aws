@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/organizations"
+	multierror "github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
@@ -841,47 +842,47 @@ func testAccPreCheckSkipError(err error) bool {
 	return false
 }
 
-// testSweepMaxJobs is the maximum number of goroutines to use in sweeping.
-// The actual number may be lower depending on the needed jobs.
-const testSweepMaxJobs = 20
-
-// testSweepUnitOfWorkFunc is a function type for a unit of sweeping work.
-type testSweepUnitOfWorkFunc func(id, region string) error
-
 // testSweepOrchestrator orchestrates goroutines to perform sweeping work.
-func testSweepOrchestrator(jobs []string, region string, f testSweepUnitOfWorkFunc) {
-	jobCount := testSweepMaxJobs
-	if len(jobs) < jobCount {
-		jobCount = len(jobs)
-	}
-
+func testSweepOrchestrator(jobs []string, r *schema.Resource, d *schema.ResourceData, region string) error {
 	var wg sync.WaitGroup
-	jobChan := make(chan string, jobCount)
+	wgDone := make(chan bool)
+	errChan := make(chan error, len(jobs))
 
-	for workerID := 0; workerID < jobCount; workerID++ {
+	for _, jobID := range jobs {
 		wg.Add(1)
-		go testSweepJob(f, region, jobChan, &wg)
+
+		go func(id string) {
+			defer wg.Done()
+
+			client, err := sharedClientForRegion(region)
+			if err != nil {
+				errChan <- fmt.Errorf("error getting client: %s", err)
+				return
+			}
+
+			d.SetId(id)
+			err = r.Delete(d, client)
+			if err != nil {
+				errChan <- err
+			}
+		}(jobID)
 	}
 
-	for _, id := range jobs {
-		jobChan <- id
+	go func() {
+		wg.Wait()
+		close(wgDone)
+		close(errChan)
+	}()
+
+	var errors error
+	var mutex = &sync.Mutex{}
+	for err := range errChan {
+		mutex.Lock()
+		errors = multierror.Append(errors, err)
+		mutex.Unlock()
 	}
 
-	close(jobChan)
-	wg.Wait()
-}
-
-// testSweepJob should only be called by testSweepOrachestrator and calls the
-// work function for the sweep
-func testSweepJob(f testSweepUnitOfWorkFunc, region string, jobChan <-chan string, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for id := range jobChan {
-		err := f(id, region)
-		if err != nil {
-			log.Printf("[ERROR] sweeping error: %s", err)
-		}
-	}
+	return errors
 }
 
 // Check sweeper API call error for reasons to skip sweeping
