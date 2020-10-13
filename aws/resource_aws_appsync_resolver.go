@@ -45,11 +45,11 @@ func resourceAwsAppsyncResolver() *schema.Resource {
 			},
 			"request_template": {
 				Type:     schema.TypeString,
-				Required: true,
+				Optional: true,
 			},
 			"response_template": {
 				Type:     schema.TypeString,
-				Required: true, // documentation bug, the api returns 400 if this is not specified.
+				Optional: true, // documentation bug, the api returns 400 if this is not specified.
 			},
 			"kind": {
 				Type:     schema.TypeString,
